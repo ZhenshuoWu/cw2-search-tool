@@ -41,6 +41,20 @@ class CrawlFailure:
     url: str
     reason: str
 
+
+@dataclass(frozen=True)
+class CrawlRequest:
+    """Audit information for one attempted request."""
+
+    requested_url: str
+    final_url: str
+    status_code: int | None
+    started_at: float
+    delay_seconds: float
+    accepted: bool
+    reason: str
+
+
 def normalize_url(url: str) -> str:
     """Return a stable URL without fragments."""
 
@@ -114,6 +128,7 @@ class WebsiteCrawler:
         self.logger = logger or logging.getLogger(__name__)
         self.max_pages = max_pages
         self.errors: list[CrawlFailure] = []
+        self.requests: list[CrawlRequest] = []
         self._last_request_started_at: Optional[float] = None
 
     def crawl(self) -> list[CrawledPage]:
@@ -145,40 +160,105 @@ class WebsiteCrawler:
             self._record_error(normalized_url, "URL is outside the allowed domain")
             return None
 
-        self._respect_politeness()
-        self._last_request_started_at = self.time_func()
+        delay_seconds = self._respect_politeness()
+        started_at = self.time_func()
+        self._last_request_started_at = started_at
 
         try:
             response = self.session.get(normalized_url, timeout=self.timeout)
         except requests.RequestException as exc:
-            self._record_error(normalized_url, f"request failed: {exc}")
+            reason = f"request failed: {exc}"
+            self._record_error(normalized_url, reason)
+            self._record_request(
+                requested_url=normalized_url,
+                final_url=normalized_url,
+                status_code=None,
+                started_at=started_at,
+                delay_seconds=delay_seconds,
+                accepted=False,
+                reason=reason,
+            )
             return None
 
         status_code = getattr(response, "status_code", None)
         if status_code != 200:
-            self._record_error(normalized_url, f"unexpected status code: {status_code}")
+            reason = f"unexpected status code: {status_code}"
+            self._record_error(normalized_url, reason)
+            self._record_request(
+                requested_url=normalized_url,
+                final_url=normalized_url,
+                status_code=status_code,
+                started_at=started_at,
+                delay_seconds=delay_seconds,
+                accepted=False,
+                reason=reason,
+            )
             return None
 
         final_url = normalize_url(getattr(response, "url", normalized_url) or normalized_url)
         if not is_allowed_url(final_url, self.allowed_domain):
-            self._record_error(final_url, "response URL is outside the allowed domain")
+            reason = "response URL is outside the allowed domain"
+            self._record_error(final_url, reason)
+            self._record_request(
+                requested_url=normalized_url,
+                final_url=final_url,
+                status_code=status_code,
+                started_at=started_at,
+                delay_seconds=delay_seconds,
+                accepted=False,
+                reason=reason,
+            )
             return None
 
+        self._record_request(
+            requested_url=normalized_url,
+            final_url=final_url,
+            status_code=status_code,
+            started_at=started_at,
+            delay_seconds=delay_seconds,
+            accepted=True,
+            reason="",
+        )
         return CrawledPage(
             url=final_url,
             html=getattr(response, "text", ""),
             status_code=status_code,
         )
 
-    def _respect_politeness(self) -> None:
+    def _respect_politeness(self) -> float:
         if self._last_request_started_at is None:
-            return
+            return 0.0
 
         elapsed = self.time_func() - self._last_request_started_at
         remaining = self.politeness_delay - elapsed
         if remaining > 0:
             self.sleep_func(remaining)
+            return remaining
+        return 0.0
 
     def _record_error(self, url: str, reason: str) -> None:
         self.errors.append(CrawlFailure(url=url, reason=reason))
         self.logger.warning("Skipping %s: %s", url, reason)
+
+    def _record_request(
+        self,
+        *,
+        requested_url: str,
+        final_url: str,
+        status_code: int | None,
+        started_at: float,
+        delay_seconds: float,
+        accepted: bool,
+        reason: str,
+    ) -> None:
+        self.requests.append(
+            CrawlRequest(
+                requested_url=requested_url,
+                final_url=final_url,
+                status_code=status_code,
+                started_at=started_at,
+                delay_seconds=delay_seconds,
+                accepted=accepted,
+                reason=reason,
+            )
+        )

@@ -5,4 +5,6 @@ __pycache__/
 htmlcov/
 .venv/
 data/index.json
+data/crawl_report.json
+cw2.pdf
 .DS_Store

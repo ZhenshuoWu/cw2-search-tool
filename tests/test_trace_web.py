@@ -1,4 +1,5 @@
 from src.trace_web import collect_build_events, normalize_language, render_trace_page
+from src.indexer import PageDocument, build_inverted_index
 from src.search import demo_pages
 
 
@@ -69,3 +70,20 @@ def test_render_trace_page_escapes_query_text():
     assert "&lt;script&gt;alert" in html
     assert "<script>alert" not in html
     assert "No valid tokens" not in html
+
+
+def test_render_trace_page_can_show_saved_index_without_demo_pages():
+    index = build_inverted_index(
+        [
+            PageDocument(
+                url="test://page",
+                html='<div class="quote"><span class="text">Careful search.</span></div>',
+            )
+        ]
+    )
+
+    html = render_trace_page("careful", index=index, pages=[])
+
+    assert "Rendering a saved index" in html
+    assert "test://page" in html
+    assert "[Careful] search." in html

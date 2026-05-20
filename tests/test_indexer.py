@@ -158,6 +158,10 @@ def test_build_inverted_index_records_frequency_positions_and_page_metadata():
 
     assert index.pages["https://quotes.toscrape.com/"].title == "Quotes Page One"
     assert index.pages["https://quotes.toscrape.com/"].word_count == 6
+    assert index.pages["https://quotes.toscrape.com/"].quote_count == 1
+    assert index.pages["https://quotes.toscrape.com/"].searchable_text == (
+        "Good friends are good. Alice Friendship"
+    )
     assert index.words["good"]["https://quotes.toscrape.com/"].frequency == 2
     assert index.words["good"]["https://quotes.toscrape.com/"].positions == [0, 3]
     assert index.words["good"]["https://quotes.toscrape.com/page/2/"].frequency == 1

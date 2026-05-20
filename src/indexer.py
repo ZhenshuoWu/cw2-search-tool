@@ -35,6 +35,8 @@ class PageMetadata:
     url: str
     title: str
     word_count: int
+    searchable_text: str = ""
+    quote_count: int = 0
 
 
 @dataclass
@@ -98,12 +100,15 @@ def build_inverted_index(pages: Iterable[PageDocument]) -> InvertedIndex:
     index = InvertedIndex()
 
     for page in pages:
+        quotes = extract_quotes(page.html)
         searchable_text = extract_searchable_text(page.html)
         tokens = tokenize(searchable_text)
         index.pages[page.url] = PageMetadata(
             url=page.url,
             title=extract_title(page.html),
             word_count=len(tokens),
+            searchable_text=searchable_text,
+            quote_count=len(quotes),
         )
 
         for position, token in enumerate(tokens):

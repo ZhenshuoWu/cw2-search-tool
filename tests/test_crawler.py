@@ -69,6 +69,11 @@ def test_crawler_follows_quote_pagination_links():
     assert [page.url for page in pages] == [start_url, page_two_url]
     assert [call[0] for call in session.calls] == [start_url, page_two_url]
     assert crawler.errors == []
+    assert [request.accepted for request in crawler.requests] == [True, True]
+    assert [request.delay_seconds for request in crawler.requests] == [
+        0.0,
+        DEFAULT_POLITENESS_DELAY,
+    ]
 
 
 def test_crawler_waits_at_least_six_seconds_between_successive_requests():

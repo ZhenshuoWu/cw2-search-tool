@@ -6,6 +6,7 @@ import argparse
 from dataclasses import dataclass
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from src.indexer import (
@@ -18,7 +19,8 @@ from src.indexer import (
     extract_title,
     tokenize,
 )
-from src.search import demo_pages, find_pages
+from src.search import demo_pages, find_pages, ranked_search
+from src.storage import load_index
 
 DEFAULT_QUERY = "good friends"
 DEFAULT_LANGUAGE = "en"
@@ -63,6 +65,7 @@ TEXT = {
         "inverted_index": "Inverted Index",
         "query_intersection": "Query Intersection",
         "no_valid_tokens": "No valid tokens were found in the query.",
+        "saved_index_note": "Rendering a saved index. Extraction and build traces are shown when demo pages are used.",
         "normalized_query": "Normalized query",
         "final_result": "Final result",
         "no_matches": "(no matches)",
@@ -106,6 +109,7 @@ TEXT = {
         "inverted_index": "倒排索引",
         "query_intersection": "查询集合交集",
         "no_valid_tokens": "查询中没有可用 token。",
+        "saved_index_note": "当前展示的是已保存索引。使用 demo pages 时会显示抽取和构建追踪。",
         "normalized_query": "归一化查询",
         "final_result": "最终结果",
         "no_matches": "（无匹配）",
@@ -127,16 +131,33 @@ class BuildEvent:
     positions: tuple[int, ...]
 
 
-def render_trace_page(query: str = DEFAULT_QUERY, lang: str = DEFAULT_LANGUAGE) -> str:
+def render_trace_page(
+    query: str = DEFAULT_QUERY,
+    lang: str = DEFAULT_LANGUAGE,
+    *,
+    index: InvertedIndex | None = None,
+    pages: list[PageDocument] | None = None,
+) -> str:
     """Return a complete HTML page for visualizing the demo data flow."""
 
     lang = normalize_language(lang)
     text = TEXT[lang]
-    pages = demo_pages()
-    index = build_inverted_index(pages)
+    trace_pages = demo_pages() if pages is None and index is None else pages or []
+    index = index or build_inverted_index(trace_pages)
     query_tokens = tokenize(query)
     matching_pages = find_pages(index, query)
-    build_events = collect_build_events(pages)
+    build_events = collect_build_events(trace_pages)
+
+    trace_sections = []
+    if trace_pages:
+        trace_sections.extend(
+            [
+                _page_flow(trace_pages, text),
+                _build_flow(build_events, text),
+            ]
+        )
+    else:
+        trace_sections.append(_saved_index_note(text))
 
     return "\n".join(
         [
@@ -153,10 +174,9 @@ def render_trace_page(query: str = DEFAULT_QUERY, lang: str = DEFAULT_LANGUAGE) 
             _header(query, index, text),
             _pipeline(text),
             _query_form(query, lang, text),
-            _page_flow(pages, text),
-            _build_flow(build_events, text),
+            *trace_sections,
             _index_view(index, text),
-            _query_view(index, query_tokens, matching_pages, text),
+            _query_view(index, query, query_tokens, matching_pages, text),
             "</main>",
             "</body>",
             "</html>",
@@ -205,6 +225,9 @@ def collect_build_events(pages: list[PageDocument]) -> list[BuildEvent]:
 class TraceRequestHandler(BaseHTTPRequestHandler):
     """HTTP handler that serves the trace visualizer."""
 
+    trace_index: InvertedIndex | None = None
+    trace_pages: list[PageDocument] | None = None
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path not in {"/", "/trace"}:
@@ -214,7 +237,12 @@ class TraceRequestHandler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
         query = params.get("q", [DEFAULT_QUERY])[0]
         lang = normalize_language(params.get("lang", [DEFAULT_LANGUAGE])[0])
-        body = render_trace_page(query, lang).encode("utf-8")
+        body = render_trace_page(
+            query,
+            lang,
+            index=self.trace_index,
+            pages=self.trace_pages,
+        ).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -231,7 +259,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the CW2 trace visualizer.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument(
+        "--index",
+        default="",
+        help="Optional saved index JSON path, for example data/index.json.",
+    )
     args = parser.parse_args()
+
+    if args.index:
+        TraceRequestHandler.trace_index = load_index(Path(args.index))
+        TraceRequestHandler.trace_pages = []
 
     server = ThreadingHTTPServer((args.host, args.port), TraceRequestHandler)
     print(f"Trace visualizer running at http://{args.host}:{args.port}/")
@@ -282,6 +319,14 @@ def _query_form(query: str, lang: str, text: dict[str, object]) -> str:
         </select>
         <button type="submit">{escape(str(text['update']))}</button>
       </form>
+    </section>
+    """
+
+
+def _saved_index_note(text: dict[str, object]) -> str:
+    return f"""
+    <section class="band">
+      <p class="section-note">{escape(str(text['saved_index_note']))}</p>
     </section>
     """
 
@@ -394,6 +439,7 @@ def _index_view(index: InvertedIndex, text: dict[str, object]) -> str:
 
 def _query_view(
     index: InvertedIndex,
+    query: str,
     query_tokens: list[str],
     matching_pages: list[str],
     text: dict[str, object],
@@ -432,7 +478,16 @@ def _query_view(
         )
 
     steps = "".join(f"<li>{step}</li>" for step in intersections)
-    matches = "".join(f"<li>{escape(url)}</li>" for url in matching_pages) or f"<li>{escape(str(text['no_matches']))}</li>"
+    ranked_results = {result.url: result for result in ranked_search(index, query)}
+    matches = "".join(
+        f"""
+        <li>
+          <strong>{escape(url)}</strong>
+          <span>{escape(ranked_results[url].snippet) if url in ranked_results else ""}</span>
+        </li>
+        """
+        for url in matching_pages
+    ) or f"<li>{escape(str(text['no_matches']))}</li>"
     return f"""
     <section class="band">
       <h2>{escape(str(text['query_intersection']))}</h2>
@@ -571,6 +626,7 @@ def _css() -> str:
     .set-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
     .intersection { margin-bottom: 16px; }
     .results li { font-weight: 700; }
+    .results span { display: block; color: var(--muted); font-weight: 400; }
     @media (max-width: 820px) {
       .shell { padding: 14px; }
       .top, .page-grid, .index-list, .set-grid, .pipeline { grid-template-columns: 1fr; }

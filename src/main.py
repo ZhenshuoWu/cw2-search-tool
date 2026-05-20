@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import cmd
 from collections.abc import Callable
+from pathlib import Path
 from typing import TextIO
 
+from src.crawler import WebsiteCrawler
 from src.indexer import InvertedIndex, PageDocument, build_inverted_index
 from src.search import (
-    demo_pages,
     format_find_results,
     format_index_summary,
     format_word_entry,
+)
+from src.storage import (
+    DEFAULT_INDEX_PATH,
+    DEFAULT_REPORT_PATH,
+    load_index,
+    save_crawl_report,
+    save_index,
 )
 
 
@@ -25,11 +33,17 @@ class SearchShell(cmd.Cmd):
         self,
         *,
         output: TextIO | None = None,
-        pages_provider: Callable[[], list[PageDocument]] = demo_pages,
+        pages_provider: Callable[[], list[PageDocument]] | None = None,
+        crawler_factory: Callable[[], WebsiteCrawler] = WebsiteCrawler,
+        index_path: Path | str = DEFAULT_INDEX_PATH,
+        report_path: Path | str = DEFAULT_REPORT_PATH,
     ) -> None:
         super().__init__(stdout=output)
         self.index: InvertedIndex | None = None
         self.pages_provider = pages_provider
+        self.crawler_factory = crawler_factory
+        self.index_path = Path(index_path)
+        self.report_path = Path(report_path)
 
     @property
     def index_loaded(self) -> bool:
@@ -49,21 +63,52 @@ class SearchShell(cmd.Cmd):
         self._write(f"Unknown command: {command}. Type help for options.")
 
     def do_build(self, arg: str) -> None:
-        """Build a small in-memory index for the current runnable version."""
+        """Crawl the target website, build the index, and save it to disk."""
 
         if self._has_extra_arguments("build", arg):
             return
-        pages = self.pages_provider()
+
+        crawler: WebsiteCrawler | None = None
+        if self.pages_provider is None:
+            crawler = self.crawler_factory()
+            crawled_pages = crawler.crawl()
+            pages = [
+                PageDocument(url=page.url, html=page.html)
+                for page in crawled_pages
+            ]
+        else:
+            pages = self.pages_provider()
+
         self.index = build_inverted_index(pages)
+        index_path = save_index(self.index, self.index_path)
         self._write(format_index_summary(self.index))
-        self._write("Built from local demo pages; crawler/persistence wiring comes later.")
+        self._write(f"Saved index to {index_path}.")
+
+        if crawler is not None:
+            report_path = save_crawl_report(
+                path=self.report_path,
+                pages_crawled=len(pages),
+                politeness_delay=crawler.politeness_delay,
+                requests=crawler.requests,
+                errors=crawler.errors,
+            )
+            self._write(
+                f"Crawl report saved to {report_path}: "
+                f"{len(crawler.requests)} requests, {len(crawler.errors)} errors."
+            )
 
     def do_load(self, arg: str) -> None:
         """Load a saved index from disk."""
 
         if self._has_extra_arguments("load", arg):
             return
-        self._write("Load is a placeholder in this version. Run build for a demo index.")
+        try:
+            self.index = load_index(self.index_path)
+        except FileNotFoundError:
+            self._write(f"No saved index found at {self.index_path}. Run build first.")
+            return
+        self._write(format_index_summary(self.index))
+        self._write(f"Loaded index from {self.index_path}.")
 
     def do_print(self, arg: str) -> None:
         """Print the inverted index entry for one word."""
@@ -104,6 +149,7 @@ class SearchShell(cmd.Cmd):
         self._write(
             "Commands: build, load, print <word>, find <query terms>, help, exit"
         )
+        self._write('Tip: use quotes for exact phrases, e.g. find "good friends".')
 
     def do_exit(self, arg: str) -> bool:
         """Exit the shell."""
